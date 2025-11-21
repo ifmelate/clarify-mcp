@@ -1,4 +1,4 @@
-# MCP Clarify
+# Clarify MCP Server
 
 A minimal Model Context Protocol (MCP) server that enables AI agents to ask clarification questions and receive structured user input through a simple Human-in-the-Loop interface.
 
