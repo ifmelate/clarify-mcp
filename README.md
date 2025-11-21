@@ -212,12 +212,6 @@ Contributions are welcome! Please ensure your code:
 
 MIT License - See LICENSE file for details
 
-## Links
-
-- [MCP Specification](https://modelcontextprotocol.io/)
-- [FastMCP Documentation](https://github.com/jlowin/fastmcp)
-- [GitHub Repository](https://github.com/ifmelate/mcp-clarify)
-
 ## Support
 
 For issues and questions:
