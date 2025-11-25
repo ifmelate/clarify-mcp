@@ -38,8 +38,22 @@ except Exception as e:  # ImportError or SDK not installed
         f"Import error: {e}"
     )
 
+# Optional: Import error handling middleware if available
+try:
+    from mcp.server.fastmcp.middleware import ErrorHandlingMiddleware
+    _HAS_ERROR_MIDDLEWARE = True
+except ImportError:
+    _HAS_ERROR_MIDDLEWARE = False
+
 
 mcp = FastMCP("mcp-clarify")
+
+# Add error handling middleware if available
+if _HAS_ERROR_MIDDLEWARE:
+    mcp.add_middleware(ErrorHandlingMiddleware(
+        include_traceback=True,
+        transform_errors=True
+    ))
 
 
 class ClarifyAnswer(BaseModel):
@@ -60,8 +74,8 @@ async def ask_clarification(ctx: Context[ServerSession, None], prompt: str, choi
     """
     Ask a single clarification question and capture a concise answer.
 
-    Uses FastMCP elicitation with response_type (not response_schema) so that
-    MCP clients (Cursor, VS Code, Claude Desktop) render a small input form.
+    Uses FastMCP elicitation with a Pydantic schema so that MCP clients 
+    (Cursor, VS Code, Claude Desktop) render a small input form.
 
     Args:
         prompt: The human-visible question to ask (e.g., "Pick target latency SLA?")
@@ -71,108 +85,37 @@ async def ask_clarification(ctx: Context[ServerSession, None], prompt: str, choi
     Returns:
         JSON with fields: {"question": str, "answer": str}
     """
-    # Be compatible across FastMCP variants by trying multiple signatures.
-    # We'll attempt several combinations in order, catching TypeError and moving on.
-    # Also handle both "message" and "prompt" as the text key.
-    tried_errors = []
-    for text_key in ("message", "prompt"):
-        # Show choices on separate lines for readability.
-        display_prompt = prompt
-        if choices:
-            lines = "\n".join(f"{i+1}) {str(c)}" for i, c in enumerate(choices))
-            display_prompt = f"{prompt}\n\nOptions:\n{lines}\n(Type the value or its number)"
-        message_kwargs: Dict[str, Any] = {text_key: display_prompt}
-        # 0) JSON Schema dict (most portable across SDK variants)
-        answer_schema: Dict[str, Any] = {"type": "string", "title": "Answer"}
-        if choices:
-            # Provide an enum to let clients render a select/radio UI.
-            # Dedupe while preserving order and coerce values to strings.
-            answer_schema["enum"] = list(dict.fromkeys([str(c) for c in choices]))
-            # Also include oneOf with const+title for clients that surface labels from oneOf
-            answer_schema["oneOf"] = [
-                {"const": str(c), "title": str(c)} for c in answer_schema["enum"]
-            ]
-
-        schema_json: Dict[str, Any] = {
-            "type": "object",
-            "title": "ClarifyAnswer",
-            "properties": {"answer": answer_schema},
-            "required": ["answer"],
-            "additionalProperties": False,
-        }
-        try:
-            result = await ctx.elicit(**message_kwargs, response_schema=schema_json)  # type: ignore[call-arg]
-            break
-        except Exception as e:
-            tried_errors.append(str(e))
-        try:
-            result = await ctx.elicit(**message_kwargs, schema=schema_json)  # type: ignore[call-arg]
-            break
-        except Exception as e:
-            tried_errors.append(str(e))
-        try:
-            result = await ctx.elicit(schema_json, **message_kwargs)  # type: ignore[misc]
-            break
-        except Exception as e:
-            tried_errors.append(str(e))
-        # 0b) If schemas are ignored but response_type is honored, construct
-        #     a dynamic Pydantic model with Literal[...] to encode choices.
-        dynamic_model = None
-        if choices:
-            try:
-                from pydantic import create_model  # type: ignore
-                allowed = tuple(str(c) for c in list(dict.fromkeys(choices)))
-                # Create Literal at runtime
-                AnswerLiteral = Literal[allowed]  # type: ignore[misc]
-                dynamic_model = create_model("ClarifyAnswerChoices", answer=(AnswerLiteral, ...))  # type: ignore[assignment]
-            except Exception as e:
-                tried_errors.append(str(e))
-        if dynamic_model is not None:
-            try:
-                result = await ctx.elicit(**message_kwargs, response_type=dynamic_model)  # type: ignore[call-arg]
-                break
-            except Exception as e:
-                tried_errors.append(str(e))
-        try:
-            result = await ctx.elicit(**message_kwargs, response_type=ClarifyAnswer)  # type: ignore[call-arg]
-            break
-        except Exception as e:
-            tried_errors.append(str(e))
-        try:
-            result = await ctx.elicit(**message_kwargs, response_schema=ClarifyAnswer)  # type: ignore[call-arg]
-            break
-        except Exception as e:
-            tried_errors.append(str(e))
-        try:
-            result = await ctx.elicit(**message_kwargs, response_model=ClarifyAnswer)  # type: ignore[call-arg]
-            break
-        except Exception as e:
-            tried_errors.append(str(e))
-        try:
-            result = await ctx.elicit(**message_kwargs, schema=ClarifyAnswer)  # type: ignore[call-arg]
-            break
-        except Exception as e:
-            tried_errors.append(str(e))
-        try:
-            # Some versions require positional schema first
-            result = await ctx.elicit(ClarifyAnswer, **message_kwargs)  # type: ignore[misc]
-            break
-        except Exception as e:
-            tried_errors.append(str(e))
-        try:
-            # As a last resort, try without schema and coerce later
-            result = await ctx.elicit(**message_kwargs)  # type: ignore[call-arg]
-            break
-        except Exception as e:
-            tried_errors.append(str(e))
-    else:
-        # If we exhausted loops without break, raise a helpful error
-        raise TypeError("ctx.elicit signature not compatible; tried variants: " + " | ".join(tried_errors))
+    import asyncio
+    
+    # Show choices on separate lines for readability
+    display_prompt = prompt
+    if choices:
+        lines = "\n".join(f"{i+1}) {str(c)}" for i, c in enumerate(choices))
+        display_prompt = f"{prompt}\n\nOptions:\n{lines}\n(Type the value or its number)"
+    
+    # MCP elicitation only supports primitive types (str, int, float, bool)
+    # Use the simple ClarifyAnswer model with string field for all cases
+    # Choices are displayed in the prompt text and handled in post-processing
+    schema_model = ClarifyAnswer
+    
+    # Use a single elicitation call with proper timeout (60 seconds)
+    # This prevents duplicate responses and race conditions
+    try:
+        result = await asyncio.wait_for(
+            ctx.elicit(message=display_prompt, schema=schema_model),
+            timeout=60.0
+        )
+    except asyncio.TimeoutError:
+        raise TimeoutError("MCP error -32001: Clarification request timed out after 60 seconds")
+    except Exception as e:
+        # Catch and re-raise as a clear error
+        raise RuntimeError(f"Elicitation failed: {str(e)}") from e
 
     answer = ""
     # FastMCP returns an object with fields like action (accept/decline/cancel) and data
     action = getattr(result, "action", None)
     data = getattr(result, "data", None)
+    
     if action == "accept" and data is not None:
         try:
             # Handle dataclass-like, dict, or simple types
